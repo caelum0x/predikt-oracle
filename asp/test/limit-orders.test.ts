@@ -167,7 +167,8 @@ describe('immediate fills', () => {
     // Fills are real trades: position, history, fee to the creator.
     const pos = svc.getPositions(bob.id).find((p) => p.marketId === market.id)
     expect(pos?.yesShares ?? 0).toBeGreaterThan(20) // < 1 credit per share
-    expect(pos?.invested).toBeCloseTo(20, 6)
+    // Cost basis is pool-net: 20 minus the 1% fee paid to the creator.
+    expect(pos?.invested).toBeCloseTo(19.8, 6)
     const fills = fillTradesOf(market.id, [bob.id])
     expect(fills.length).toBeGreaterThan(0)
     const spent = fills.reduce((sum, t) => sum + t.amount, 0)
@@ -405,11 +406,19 @@ describe('resolution and conservation of money', () => {
     expect(svc.getAccount(carol.id).balance).toBe(SIGNUP_GRANT - 40)
 
     svc.resolveMarket(alice.id, market.id, 'CANCEL')
-    // Carol never filled: her reservation comes back in full. Bob's invested
-    // cost basis is refunded by CANCEL as before.
+    // Carol never filled: her reservation comes back in full. Bob's pool-net
+    // cost basis (49.5) is refunded by CANCEL; the 0.5 fee stays with the
+    // creator, so no money is minted.
     expect(svc.getAccount(carol.id).balance).toBe(SIGNUP_GRANT)
-    expect(svc.getAccount(bob.id).balance).toBeCloseTo(SIGNUP_GRANT, 4)
+    expect(svc.getAccount(bob.id).balance).toBeCloseTo(SIGNUP_GRANT - 0.5, 4)
     expect(svc.listOrders(carol.id)[0]!.status).toBe('CANCELLED')
+    // Regression: CANCEL with prior trading used to mint the collected fees.
+    const total =
+      svc.getAccount(alice.id).balance +
+      svc.getAccount(bob.id).balance +
+      svc.getAccount(carol.id).balance +
+      svc.getAccount(dave.id).balance
+    expect(total).toBeCloseTo(4 * SIGNUP_GRANT, 4)
   })
 
   it('conserves total money across a lifecycle with direct trades, fills, and reserved funds', () => {

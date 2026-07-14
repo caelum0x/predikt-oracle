@@ -93,7 +93,11 @@ function requireAccount(service: MarketService, apiKey: string): Account {
 const apiKeyInput = z
   .string()
   .min(8)
-  .describe('Your Predikt API key (returned once by predikt_create_account).')
+  .describe(
+    'Your Predikt API key (returned once by predikt_create_account). ' +
+      'SENSITIVE CREDENTIAL: do not log, echo, or persist tool-call arguments ' +
+      'containing this value.'
+  )
 
 const marketIdInput = z.string().min(1).describe('Market id, e.g. mkt_...')
 

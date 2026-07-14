@@ -220,15 +220,16 @@ describe('GET /accounts/me/portfolio', () => {
     expect(entry.probability).toBeCloseTo(current.probability, 6)
     expect(entry.yesShares).toBeCloseTo(pos.yesShares, 6)
     expect(entry.noShares).toBeCloseTo(pos.noShares, 6)
-    expect(entry.invested).toBeCloseTo(150, 6)
+    // invested is pool-net: 150 staked minus the 1% fee = 148.5.
+    expect(entry.invested).toBeCloseTo(148.5, 6)
     expect(entry.markValue).toBeCloseTo(expectedMark, 5)
-    expect(entry.unrealizedPnl).toBeCloseTo(expectedMark - 150, 5)
+    expect(entry.unrealizedPnl).toBeCloseTo(expectedMark - 148.5, 5)
 
     const totals = body.data.totals
     expect(totals.balance).toBeCloseTo(1000 - 150, 6)
     expect(totals.portfolioValue).toBeCloseTo(expectedMark, 5)
-    expect(totals.totalInvested).toBeCloseTo(150, 6)
-    expect(totals.totalUnrealizedPnl).toBeCloseTo(expectedMark - 150, 5)
+    expect(totals.totalInvested).toBeCloseTo(148.5, 6)
+    expect(totals.totalUnrealizedPnl).toBeCloseTo(expectedMark - 148.5, 5)
   })
 
   it('values resolved markets at settlement: YES pays yesShares, CANCEL refunds invested', async () => {
@@ -247,21 +248,23 @@ describe('GET /accounts/me/portfolio', () => {
       body.data.positions.map((p: any) => [p.marketId, p])
     )
 
+    // Cost bases are pool-net: 80 * 0.99 = 79.2 and 60 * 0.99 = 59.4.
     const wonEntry = byId.get(won.id)
     expect(wonEntry.status).toBe('RESOLVED')
     expect(wonEntry.outcome).toBe('YES')
     expect(wonEntry.markValue).toBeCloseTo(buyWon.shares, 6)
-    expect(wonEntry.unrealizedPnl).toBeCloseTo(buyWon.shares - 80, 5)
+    expect(wonEntry.unrealizedPnl).toBeCloseTo(buyWon.shares - 79.2, 5)
 
     const cancelEntry = byId.get(cancelled.id)
     expect(cancelEntry.outcome).toBe('CANCEL')
-    expect(cancelEntry.markValue).toBeCloseTo(60, 6)
+    // CANCEL refunds exactly the pool-net cost basis, so mark = invested.
+    expect(cancelEntry.markValue).toBeCloseTo(59.4, 6)
     expect(cancelEntry.unrealizedPnl).toBeCloseTo(0, 6)
 
     const totals = body.data.totals
-    expect(totals.portfolioValue).toBeCloseTo(buyWon.shares + 60, 5)
-    expect(totals.totalInvested).toBeCloseTo(140, 6)
-    expect(totals.totalUnrealizedPnl).toBeCloseTo(buyWon.shares - 80, 5)
+    expect(totals.portfolioValue).toBeCloseTo(buyWon.shares + 59.4, 5)
+    expect(totals.totalInvested).toBeCloseTo(138.6, 6)
+    expect(totals.totalUnrealizedPnl).toBeCloseTo(buyWon.shares - 79.2, 5)
   })
 
   it('excludes positions whose shares were fully sold', async () => {
@@ -349,6 +352,49 @@ describe('GET /feed', () => {
     const body = await json(await get('/feed?limit=1'))
     expect(body.data.events).toHaveLength(1)
     expect(body.data.events[0].type).toBe('trade')
+  })
+
+  it('computes probabilities in bulk: query count does not grow with market count', async () => {
+    // Regression: /feed used to call service.getMarket() per created-market
+    // row (an N+1). Now it issues a bounded number of queries regardless of
+    // how many markets exist, and the probabilities still match the service.
+    const alice = service.createAccount('alice-agent')
+    for (let i = 0; i < 6; i++) {
+      makeMarket(alice.account.id, `Binary feed market number ${i} resolves?`)
+    }
+    const multi = service.createMarket(alice.account.id, {
+      question: 'Which option wins the feed N+1 regression market?',
+      criteria: 'Resolves to the winner announced by the harness.',
+      closeTime: FUTURE(),
+      subsidy: 90,
+      outcomeType: 'MULTI',
+      answers: ['A', 'B', 'C'],
+    })
+    service.buy(alice.account.id, multi.id, 'YES', 10, multi.answers![1]!.id)
+
+    const expected = new Map<string, number>()
+    for (const market of service.listMarkets()) {
+      expected.set(market.id, market.probability)
+    }
+
+    let prepares = 0
+    const original = db.prepare.bind(db)
+    ;(db as { prepare: typeof db.prepare }).prepare = ((sql: string) => {
+      prepares += 1
+      return original(sql)
+    }) as typeof db.prepare
+
+    const body = await json(await get('/feed?limit=50'))
+    // trades + created markets + resolved markets + one bulk answers query.
+    expect(prepares).toBeLessThanOrEqual(4)
+
+    const createdEvents = body.data.events.filter(
+      (e: any) => e.type === 'market_created'
+    )
+    expect(createdEvents).toHaveLength(7)
+    for (const event of createdEvents) {
+      expect(event.probability).toBeCloseTo(expected.get(event.marketId)!, 6)
+    }
   })
 
   it('returns an empty feed on a fresh database and validates limit', async () => {

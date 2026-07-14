@@ -6,8 +6,10 @@ import { describe, expect, it } from 'vitest'
 import { createApp as createAppBase, type AppOptions } from '../src/app'
 import { openDb } from '../src/engine/store'
 
+// trustProxyHeader emulates a deployment behind a trusted proxy so each
+// test's unique X-Forwarded-For keeps rate-limit buckets isolated.
 const createApp = (options: AppOptions = {}) =>
-  createAppBase({ db: openDb(':memory:'), ...options })
+  createAppBase({ db: openDb(':memory:'), trustProxyHeader: true, ...options })
 import { OpenRouterError, type ChatCompletionFn } from '../src/ai/openrouter'
 
 let ipCounter = 0

@@ -26,7 +26,11 @@ import {
   suggestResolutionRequestSchema,
   type DraftMarket,
 } from './ai/schema'
-import { clientIpKey, consumeToken } from './ai/rate-limit'
+import {
+  clientIpKey,
+  consumeToken,
+  type RateLimitConfig,
+} from './ai/rate-limit'
 import { SERVICE_MANIFEST } from './manifest'
 import { MarketService } from './engine/service'
 import { openDb, type Db } from './engine/store'
@@ -72,14 +76,42 @@ function failFromAiError(c: Context, err: unknown, route: string) {
   return fail(c, 500, 'Unexpected server error.')
 }
 
+// The Node adapter (@hono/node-server) exposes the raw IncomingMessage on
+// c.env; in tests (app.request) there is no socket, so this returns undefined
+// and the rate limiter falls back to a single shared bucket.
+function socketAddressOf(c: Context): string | undefined {
+  const env = c.env as
+    | { incoming?: { socket?: { remoteAddress?: string } } }
+    | undefined
+  return env?.incoming?.socket?.remoteAddress
+}
+
 // Rate-limit by client IP; returns a response when the caller must wait.
-function checkRateLimit(c: Context, route: string) {
-  const key = `${route}:${clientIpKey((name) => c.req.header(name))}`
-  const limit = consumeToken(key)
+// Forwarding headers are only trusted when the deployment says it sits behind
+// a proxy that controls them — otherwise clients could pick their own bucket.
+function checkRateLimit(
+  c: Context,
+  route: string,
+  trustProxyHeader: boolean,
+  config?: RateLimitConfig
+) {
+  const key = `${route}:${clientIpKey((name) => c.req.header(name), {
+    trustProxyHeader,
+    socketAddress: socketAddressOf(c),
+  })}`
+  const limit = consumeToken(key, config)
   if (limit.allowed) return null
   c.header('Retry-After', String(limit.retryAfterSeconds))
   return fail(c, 429, 'Too many requests. Please wait a moment and try again.')
 }
+
+// Account creation and the leaderboard hit SQLite harder than other routes,
+// so they get their own (more generous) buckets separate from the AI tools.
+const ACCOUNT_CREATE_LIMIT: RateLimitConfig = {
+  capacity: 30,
+  refillWindowMs: 60_000,
+}
+const STATS_LIMIT: RateLimitConfig = { capacity: 60, refillWindowMs: 60_000 }
 
 async function readJsonBody(c: Context): Promise<unknown | null> {
   try {
@@ -97,16 +129,43 @@ export type AppOptions = {
   complete?: ChatCompletionFn
   // Injected in tests (':memory:'); defaults to a file DB for the server.
   db?: Db
+  // Trust X-Forwarded-For / Fly-Client-IP for rate-limit keys. Enable only
+  // behind a reverse proxy you control (TRUST_PROXY=1 in the environment).
+  trustProxyHeader?: boolean
 }
 
 export function createApp(options: AppOptions = {}): Hono {
   const complete = options.complete ?? chatCompletion
   const db = options.db ?? openDb(process.env.DB_PATH || 'predikt-oracle.db')
+  const trustProxyHeader =
+    options.trustProxyHeader ??
+    (process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true')
   const service = new MarketService(db)
   const app = new Hono()
 
   app.get('/', (c) => ok(c, SERVICE_MANIFEST))
   app.get('/health', (c) => ok(c, { status: 'ok' }))
+
+  // Unauthenticated account creation and the (SQLite-heavy) public stats
+  // routes are rate limited per client IP so they cannot be hammered from
+  // the open internet. Registered before the sub-routers below.
+  app.use('/accounts', async (c, next) => {
+    if (c.req.method === 'POST') {
+      const limited = checkRateLimit(
+        c,
+        'accounts-create',
+        trustProxyHeader,
+        ACCOUNT_CREATE_LIMIT
+      )
+      if (limited) return limited
+    }
+    await next()
+  })
+  app.use('/stats/*', async (c, next) => {
+    const limited = checkRateLimit(c, 'stats', trustProxyHeader, STATS_LIMIT)
+    if (limited) return limited
+    await next()
+  })
 
   // Accounts + market lifecycle + trading.
   app.route('/', createMarketRoutes(service))
@@ -124,7 +183,7 @@ export function createApp(options: AppOptions = {}): Hono {
 
   // POST /tools/draft-market — topic/news/url → validated market drafts.
   app.post('/tools/draft-market', async (c) => {
-    const limited = checkRateLimit(c, 'draft-market')
+    const limited = checkRateLimit(c, 'draft-market', trustProxyHeader)
     if (limited) return limited
 
     const body = await readJsonBody(c)
@@ -175,7 +234,7 @@ export function createApp(options: AppOptions = {}): Hono {
 
   // POST /tools/estimate-odds — question → calibrated probability estimate.
   app.post('/tools/estimate-odds', async (c) => {
-    const limited = checkRateLimit(c, 'estimate-odds')
+    const limited = checkRateLimit(c, 'estimate-odds', trustProxyHeader)
     if (limited) return limited
 
     const body = await readJsonBody(c)
@@ -212,7 +271,7 @@ export function createApp(options: AppOptions = {}): Hono {
 
   // POST /tools/suggest-resolution — question + evidence → proposed verdict.
   app.post('/tools/suggest-resolution', async (c) => {
-    const limited = checkRateLimit(c, 'suggest-resolution')
+    const limited = checkRateLimit(c, 'suggest-resolution', trustProxyHeader)
     if (limited) return limited
 
     const body = await readJsonBody(c)

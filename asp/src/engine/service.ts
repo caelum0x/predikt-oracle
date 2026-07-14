@@ -376,13 +376,17 @@ export class MarketService {
       this.debit(accountId, amount, 'buy')
       this.credit(row.creator_id, fee)
       this.saveTargetPool(row, target, result.newPool, amount)
+      // Cost basis tracks only what entered the pool (amount minus fee): the
+      // fee is a service charge kept by the creator, so a CANCEL refund of
+      // `invested` plus the subsidy refund exactly drains the pool backing —
+      // refunding the gross amount would mint the fee out of nothing.
       this.adjustPosition(
         accountId,
         row.id,
         target.answer?.id ?? '',
         side,
         result.shares,
-        amount
+        round6(amount - fee)
       )
 
       const trade = insertTrade(this.db, {

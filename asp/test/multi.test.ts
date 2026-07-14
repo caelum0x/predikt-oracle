@@ -340,10 +340,11 @@ describe('MULTI trading', () => {
     )
     const pos = svc.getPositions(bob.id)
     expect(pos).toHaveLength(1)
+    // invested is the pool-net cost basis: the 1% fee went to the creator.
     expect(pos[0]).toMatchObject({
       marketId: market.id,
       answerId: beta!.id,
-      invested: 60,
+      invested: 59.4,
     })
     expect(pos[0]!.yesShares).toBeCloseTo(trade.shares, 6)
   })
@@ -468,9 +469,11 @@ describe('MULTI resolution and payouts', () => {
 
     svc.resolveMarket(creator.id, market.id, 'CANCEL')
 
-    // Bob spent 85, recouped `sale.amount` mid-flight, and the CANCEL refund
-    // returns the remaining net cost basis -> right back to his grant.
-    expect(svc.getAccount(bob.id).balance).toBeCloseTo(SIGNUP_GRANT, 4)
+    // Bob spent 85 (0.85 of it fees), recouped `sale.amount` mid-flight, and
+    // the CANCEL refund returns the remaining pool-net cost basis — his grant
+    // minus the fees the creator keeps. Refunding the fees too would mint
+    // money that no longer exists in the pool.
+    expect(svc.getAccount(bob.id).balance).toBeCloseTo(SIGNUP_GRANT - 0.85, 4)
     expect(sale.amount).toBeGreaterThan(0)
     // Creator: subsidy back + buy fees kept.
     expect(svc.getAccount(creator.id).balance).toBeCloseTo(
@@ -517,7 +520,8 @@ describe('MULTI read-side: portfolio, trades, feed, reputation', () => {
     expect(entry.answerText).toBe('Team Beta')
     expect(entry.answerProbability).toBeCloseTo(answerProb, 6)
     expect(entry.markValue).toBeCloseTo(buy.shares * answerProb, 4)
-    expect(entry.unrealizedPnl).toBeCloseTo(buy.shares * answerProb - 45, 4)
+    // Cost basis is net of the 1% fee: 45 * 0.99 = 44.55.
+    expect(entry.unrealizedPnl).toBeCloseTo(buy.shares * answerProb - 44.55, 4)
   })
 
   it('portfolio values resolved MULTI positions at settlement', async () => {
@@ -569,7 +573,9 @@ describe('MULTI read-side: portfolio, trades, feed, reputation', () => {
       (60 * (winBuy.probAfter - 1) ** 2 + 40 * loseBuy.probAfter ** 2) / 100
     expect(stats.brierScore).toBeCloseTo(expectedBrier, 5)
 
-    const expectedProfit = winBuy.shares - 60 + (0 - 40)
+    // Profit is measured against the pool-net cost basis (99% of the stake);
+    // the 1% fee is a separate transfer to the creator.
+    const expectedProfit = winBuy.shares - 60 * 0.99 + (0 - 40 * 0.99)
     expect(stats.realizedProfit).toBeCloseTo(expectedProfit, 4)
     expect(stats.volume).toBeCloseTo(100, 6)
     expect(stats.marketsTraded).toBe(1)

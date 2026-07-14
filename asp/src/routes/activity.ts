@@ -37,7 +37,22 @@ type TradeRow = {
 
 type AccountTradeRow = TradeRow & { question: string }
 
-type CreatedFeedRow = { id: string; question: string; created_at: number }
+type CreatedFeedRow = {
+  id: string
+  question: string
+  created_at: number
+  outcome_type: 'BINARY' | 'MULTI'
+  pool_yes: number
+  pool_no: number
+  pool_p: number
+}
+
+type AnswerPoolRow = {
+  market_id: string
+  pool_yes: number
+  pool_no: number
+  pool_p: number
+}
 
 type ResolvedFeedRow = {
   id: string
@@ -315,7 +330,7 @@ export function createActivityRoutes(service: MarketService, db: Db): Hono<Env> 
       return failFrom(c, new ServiceError(400, 'limit must be an integer from 1 to 100.'))
     }
     try {
-      return ok(c, { events: buildFeed(service, db, result.data.limit) })
+      return ok(c, { events: buildFeed(db, result.data.limit) })
     } catch (err) {
       return failFrom(c, err)
     }
@@ -324,7 +339,7 @@ export function createActivityRoutes(service: MarketService, db: Db): Hono<Env> 
   return app
 }
 
-function buildFeed(service: MarketService, db: Db, limit: number): FeedEvent[] {
+function buildFeed(db: Db, limit: number): FeedEvent[] {
   const tradeRows = db
     .prepare(
       `SELECT t.market_id, m.question, t.side, t.kind, t.amount, t.prob_after, t.created_at
@@ -337,9 +352,15 @@ function buildFeed(service: MarketService, db: Db, limit: number): FeedEvent[] {
 
   const createdRows = db
     .prepare(
-      'SELECT id, question, created_at FROM markets ORDER BY created_at DESC LIMIT ?'
+      `SELECT id, question, created_at, outcome_type, pool_yes, pool_no, pool_p
+       FROM markets ORDER BY created_at DESC LIMIT ?`
     )
     .all(limit) as CreatedFeedRow[]
+
+  // Probabilities are computed from the pool columns already fetched — plus
+  // one bulk answers query for the MULTI markets in the page — instead of a
+  // per-market service.getMarket() round trip (an N+1 on a public endpoint).
+  const probabilityByMarket = feedProbabilities(db, createdRows)
 
   const resolvedRows = db
     .prepare(
@@ -367,7 +388,7 @@ function buildFeed(service: MarketService, db: Db, limit: number): FeedEvent[] {
         type: 'market_created',
         marketId: row.id,
         question: row.question,
-        probability: service.getMarket(row.id).probability,
+        probability: probabilityByMarket.get(row.id) ?? 0,
         createdAt: row.created_at,
       })
     ),
@@ -383,4 +404,50 @@ function buildFeed(service: MarketService, db: Db, limit: number): FeedEvent[] {
   ]
 
   return [...events].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit)
+}
+
+// CPMM YES-price straight from stored pool columns (mirrors cpmm.getProb).
+function poolProb(row: { pool_yes: number; pool_no: number; pool_p: number }): number {
+  const { pool_yes: yes, pool_no: no, pool_p: p } = row
+  return (p * no) / (p * no + (1 - p) * yes)
+}
+
+// Market probability for each feed row: the market's own pool for BINARY,
+// the leading answer's pool for MULTI (same rule as rows.toMarket). All
+// MULTI answer pools for the page are fetched in one query.
+function feedProbabilities(
+  db: Db,
+  rows: readonly CreatedFeedRow[]
+): Map<string, number> {
+  const raw = new Map<string, number>()
+  const multiIds: string[] = []
+  for (const row of rows) {
+    if (row.outcome_type === 'MULTI') {
+      multiIds.push(row.id)
+      raw.set(row.id, 0) // no answers -> 0, like toMarket
+    } else {
+      raw.set(row.id, poolProb(row))
+    }
+  }
+
+  if (multiIds.length > 0) {
+    const placeholders = multiIds.map(() => '?').join(', ')
+    const answerRows = db
+      .prepare(
+        `SELECT market_id, pool_yes, pool_no, pool_p FROM answers
+         WHERE market_id IN (${placeholders}) ORDER BY ord ASC`
+      )
+      .all(...multiIds) as AnswerPoolRow[]
+    for (const answer of answerRows) {
+      const prob = poolProb(answer)
+      const best = raw.get(answer.market_id) ?? 0
+      // Strictly-greater keeps the earliest (lowest ord) answer on ties,
+      // matching answers.leadingAnswer's 1e-12 epsilon rule.
+      if (prob > best + 1e-12) raw.set(answer.market_id, prob)
+    }
+  }
+
+  const probabilities = new Map<string, number>()
+  for (const [id, prob] of raw) probabilities.set(id, round6(prob))
+  return probabilities
 }

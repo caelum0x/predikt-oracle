@@ -133,8 +133,31 @@ describe('resolution and payouts', () => {
     const market = makeMarket(alice.id)
     svc.buy(bob.id, market.id, 'YES', 60)
     svc.resolveMarket(alice.id, market.id, 'CANCEL')
-    // Bob paid 60 (incl. fee) and gets his invested 60 back.
-    expect(svc.getAccount(bob.id).balance).toBeCloseTo(SIGNUP_GRANT, 4)
+    // Bob paid 60; 0.6 of that was the fee the creator keeps, so the CANCEL
+    // refund is his pool-net cost basis of 59.4. Refunding the fee too would
+    // mint money (the pool only ever held 59.4 of his stake).
+    expect(svc.getAccount(bob.id).balance).toBeCloseTo(SIGNUP_GRANT - 0.6, 4)
+  })
+
+  it('conserves total money when a traded market is cancelled', () => {
+    // Regression: CANCEL used to refund traders their gross stake (fees
+    // included) while fees had already been paid to the creator — minting
+    // one credit per 100 traded. Totals must return to the signup grants.
+    const market = makeMarket(alice.id)
+    svc.buy(bob.id, market.id, 'YES', 100)
+    svc.buy(alice.id, market.id, 'NO', 40)
+    const sold = svc.getPositions(bob.id)[0]!
+    svc.sell(bob.id, market.id, 'YES', sold.yesShares / 3)
+    svc.resolveMarket(alice.id, market.id, 'CANCEL')
+
+    const total =
+      svc.getAccount(alice.id).balance + svc.getAccount(bob.id).balance
+    expect(total).toBeCloseTo(2 * SIGNUP_GRANT, 2)
+    // The creator ends up with exactly the fees on top of their grant.
+    expect(svc.getAccount(alice.id).balance).toBeCloseTo(
+      SIGNUP_GRANT + 0.01 * 140 - 0.01 * 40,
+      2
+    )
   })
 
   it('only the creator can close or resolve, and only once', () => {

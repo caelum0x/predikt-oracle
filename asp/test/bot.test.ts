@@ -268,7 +268,14 @@ async function createMarket(
 }
 
 async function setup(odds: OddsFake) {
-  const app = createApp({ db: openDb(':memory:'), complete: makeComplete(odds) })
+  // trustProxyHeader emulates the production deployment behind a trusted
+  // proxy: without it the app (correctly) ignores X-Forwarded-For, and every
+  // test here would share one rate-limit bucket.
+  const app = createApp({
+    db: openDb(':memory:'),
+    complete: makeComplete(odds),
+    trustProxyHeader: true,
+  })
   const creator = await createAccount(app, 'Market Creator')
   const bot = await createAccount(app, 'Trader Bot')
   return { app, creator, bot }

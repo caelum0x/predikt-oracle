@@ -13,6 +13,7 @@ import { getX402Config, type X402Config } from '../src/payments/config'
 import {
   buildPaymentRequirements,
   decodePaymentHeader,
+  recordDeposit,
   settlePayment,
   X402Error,
   type PaymentPayload,
@@ -316,6 +317,111 @@ describe('deposit with a real EIP-3009 signature', () => {
       })
     ).toString('base64')
     expect((await deposit({ key: apiKey, payment: badNonce })).status).toBe(400)
+  })
+})
+
+describe('nonce lifecycle across failed settlement', () => {
+  function nonceCount(): number {
+    const row = db
+      .prepare('SELECT COUNT(*) AS n FROM x402_nonces')
+      .get() as { n: number }
+    return row.n
+  }
+
+  it('a failed facilitator settlement leaves the nonce reusable; the retry succeeds', async () => {
+    // Regression: the nonce used to be burned during verification, BEFORE
+    // settlement — a facilitator outage then permanently consumed the
+    // client's EIP-3009 authorization without crediting anything.
+    let facilitatorUp = false
+    const flakyFetch = (async () => {
+      if (!facilitatorUp) throw new Error('connect ECONNREFUSED')
+      return new Response(
+        JSON.stringify({ success: true, transaction: '0xfacade' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    }) as typeof fetch
+
+    const facApp = new Hono()
+    facApp.route(
+      '/',
+      createDepositRoutes(service, db, {
+        config: { ...CONFIG, facilitatorUrl: 'https://facilitator.example' },
+        fetchFn: flakyFetch,
+      })
+    )
+    const send = (payment: string) =>
+      facApp.request('/deposits', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'X-PAYMENT': payment,
+        },
+        body: JSON.stringify({ amount: 25 }),
+      })
+
+    const payment = await signPayment()
+
+    // Attempt 1: signature verifies, settlement fails -> 402, NO burn.
+    const failed = await send(payment)
+    expect(failed.status).toBe(402)
+    expect((await json(failed)).error).toMatch(/unreachable/i)
+    expect(nonceCount()).toBe(0)
+    expect(service.getAccount(accountId).balance).toBeCloseTo(SIGNUP_GRANT, 6)
+
+    // Attempt 2 with the SAME signed payload: facilitator recovered.
+    facilitatorUp = true
+    const retried = await send(payment)
+    expect(retried.status).toBe(200)
+    expect((await json(retried)).data.balance).toBeCloseTo(
+      SIGNUP_GRANT + 25,
+      6
+    )
+    expect(nonceCount()).toBe(1)
+
+    // Attempt 3: now the nonce really is burned — replay rejected, no credit.
+    const replay = await send(payment)
+    expect(replay.status).toBe(402)
+    expect((await json(replay)).error).toMatch(/already used/i)
+    expect(service.getAccount(accountId).balance).toBeCloseTo(
+      SIGNUP_GRANT + 25,
+      6
+    )
+  })
+
+  it('burns the nonce atomically with the credit in verify-only mode', async () => {
+    const payment = await signPayment()
+    expect(nonceCount()).toBe(0)
+    expect((await deposit({ key: apiKey, payment })).status).toBe(200)
+    expect(nonceCount()).toBe(1)
+  })
+
+  it('recordDeposit rolls back the credit when the nonce is already used', async () => {
+    const payment = await signPayment()
+    expect((await deposit({ key: apiKey, payment })).status).toBe(200)
+
+    // Simulate the race where a concurrent request slipped past the
+    // verify-time check: calling recordDeposit directly with the used nonce
+    // must throw and must NOT credit the account or write a deposit row.
+    const decoded = decodePaymentHeader(payment)
+    const auth = decoded.payload.authorization
+    expect(() =>
+      recordDeposit(db, {
+        accountId,
+        amount: 25,
+        txNonce: auth.nonce.toLowerCase(),
+        payer: auth.from,
+        network: decoded.network,
+      })
+    ).toThrowError(/already used/i)
+    expect(service.getAccount(accountId).balance).toBeCloseTo(
+      SIGNUP_GRANT + 25,
+      6
+    )
+    const deposits = db
+      .prepare('SELECT COUNT(*) AS n FROM deposits WHERE account_id = ?')
+      .get(accountId) as { n: number }
+    expect(deposits.n).toBe(1)
   })
 })
 

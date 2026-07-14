@@ -110,27 +110,141 @@ export function accountStats(db: Db, accountId: string): AccountStats | null {
   }
 }
 
+// One CTE per metric, joined onto accounts. Sorting and LIMIT happen in SQL
+// so a single synchronous query serves the whole leaderboard — never a
+// per-account query loop, no matter how many accounts exist.
+const LEADERBOARD_BASE_SQL = `
+  WITH buy_vol AS (
+    SELECT account_id, SUM(amount) AS volume
+      FROM trades WHERE kind = 'BUY' GROUP BY account_id
+  ),
+  traded AS (
+    SELECT account_id, COUNT(DISTINCT market_id) AS n
+      FROM trades GROUP BY account_id
+  ),
+  resolved_traded AS (
+    SELECT t.account_id AS account_id, COUNT(DISTINCT t.market_id) AS n
+      FROM trades t JOIN markets m ON m.id = t.market_id
+     WHERE m.status = 'RESOLVED' GROUP BY t.account_id
+  ),
+  created AS (
+    SELECT creator_id AS account_id, COUNT(*) AS n
+      FROM markets GROUP BY creator_id
+  ),
+  fees AS (
+    SELECT m.creator_id AS account_id, SUM(t.fee) AS s
+      FROM trades t JOIN markets m ON m.id = t.market_id
+     GROUP BY m.creator_id
+  ),
+  -- One row per (account, market): non-CANCEL sums payout - invested over
+  -- the account's positions; CANCEL sums the net invested (refund basis).
+  resolved_pos AS (
+    SELECT p.account_id AS account_id, m.outcome AS outcome,
+           SUM(CASE
+                 WHEN m.outcome = 'CANCEL' THEN p.invested
+                 WHEN m.outcome_type = 'MULTI' AND p.answer_id = m.outcome
+                   THEN p.yes_shares - p.invested
+                 WHEN m.outcome_type = 'MULTI' THEN p.no_shares - p.invested
+                 WHEN m.outcome = 'YES' THEN p.yes_shares - p.invested
+                 ELSE p.no_shares - p.invested
+               END) AS val
+      FROM positions p JOIN markets m ON m.id = p.market_id
+     WHERE m.status = 'RESOLVED'
+     GROUP BY p.account_id, p.market_id
+  ),
+  profit AS (
+    SELECT account_id,
+           SUM(CASE WHEN outcome = 'CANCEL' THEN MAX(0, val) - val ELSE val END) AS s
+      FROM resolved_pos GROUP BY account_id
+  ),
+  -- Each BUY on a resolved non-CANCEL market is a forecast; err is the
+  -- distance from the realized outcome (mirrors accountBrier()).
+  brier_terms AS (
+    SELECT t.account_id AS account_id, t.amount AS amount,
+           (t.prob_after - (CASE
+              WHEN m.outcome_type = 'MULTI'
+                THEN (CASE WHEN t.answer_id = m.outcome THEN 1.0 ELSE 0.0 END)
+              WHEN m.outcome = 'YES' THEN 1.0
+              ELSE 0.0
+            END)) AS err
+      FROM trades t JOIN markets m ON m.id = t.market_id
+     WHERE t.kind = 'BUY' AND t.amount > 0 AND m.status = 'RESOLVED'
+       AND ((m.outcome_type = 'BINARY' AND m.outcome IN ('YES', 'NO'))
+         OR (m.outcome_type = 'MULTI' AND m.outcome != 'CANCEL'))
+  ),
+  brier AS (
+    SELECT account_id, SUM(amount * err * err) AS weighted_error,
+           SUM(amount) AS weight
+      FROM brier_terms GROUP BY account_id
+  )
+  SELECT a.id AS account_id,
+         a.name AS name,
+         COALESCE(traded.n, 0) AS markets_traded,
+         COALESCE(resolved_traded.n, 0) AS markets_resolved_traded,
+         COALESCE(buy_vol.volume, 0) AS volume,
+         COALESCE(profit.s, 0) AS realized_profit,
+         CASE WHEN brier.weight > 0
+              THEN brier.weighted_error / brier.weight
+              ELSE NULL END AS brier_score,
+         COALESCE(created.n, 0) AS markets_created,
+         COALESCE(fees.s, 0) AS fees_earned
+    FROM accounts a
+    LEFT JOIN buy_vol         ON buy_vol.account_id = a.id
+    LEFT JOIN traded          ON traded.account_id = a.id
+    LEFT JOIN resolved_traded ON resolved_traded.account_id = a.id
+    LEFT JOIN created         ON created.account_id = a.id
+    LEFT JOIN fees            ON fees.account_id = a.id
+    LEFT JOIN profit          ON profit.account_id = a.id
+    LEFT JOIN brier           ON brier.account_id = a.id
+`
+
+type LeaderboardRow = {
+  account_id: string
+  name: string
+  markets_traded: number
+  markets_resolved_traded: number
+  volume: number
+  realized_profit: number
+  brier_score: number | null
+  markets_created: number
+  fees_earned: number
+}
+
 /**
  * Ranked accounts. 'profit' and 'volume' sort descending; 'brier' sorts
  * ascending (lower is better) and requires volume >= BRIER_MIN_VOLUME.
+ * Computed entirely database-side: one query, sorted and limited in SQL.
  */
 export function leaderboard(
   db: Db,
   opts: { by: LeaderboardSort; limit: number }
 ): LeaderboardEntry[] {
   const limit = clampLimit(opts.limit)
-  const ids = db
-    .prepare('SELECT id FROM accounts ORDER BY created_at ASC')
-    .all() as { id: string }[]
+  const tail =
+    opts.by === 'brier'
+      ? `WHERE brier_score IS NOT NULL AND volume >= ?
+         ORDER BY brier_score ASC, a.created_at ASC LIMIT ?`
+      : opts.by === 'volume'
+      ? 'ORDER BY volume DESC, a.created_at ASC LIMIT ?'
+      : 'ORDER BY realized_profit DESC, a.created_at ASC LIMIT ?'
+  const params =
+    opts.by === 'brier' ? [BRIER_MIN_VOLUME, limit] : [limit]
+  const rows = db
+    .prepare(`${LEADERBOARD_BASE_SQL} ${tail}`)
+    .all(...params) as LeaderboardRow[]
 
-  const stats: AccountStats[] = []
-  for (const row of ids) {
-    const s = accountStats(db, row.id)
-    if (s) stats.push(s)
-  }
-  return rankStats(stats, opts.by)
-    .slice(0, limit)
-    .map((s, i) => ({ ...s, rank: i + 1 }))
+  return rows.map((row, i) => ({
+    accountId: row.account_id,
+    name: row.name,
+    marketsTraded: row.markets_traded,
+    marketsResolvedTraded: row.markets_resolved_traded,
+    volume: round6(row.volume),
+    realizedProfit: round6(row.realized_profit),
+    brierScore: row.brier_score === null ? null : round6(row.brier_score),
+    marketsCreated: row.markets_created,
+    feesEarned: round6(row.fees_earned),
+    rank: i + 1,
+  }))
 }
 
 /** Platform-wide totals for the public stats endpoint. */
@@ -240,21 +354,6 @@ function accountBrier(db: Db, accountId: string): number | null {
     totalWeight += row.amount
   }
   return totalWeight > 0 ? round6(weightedError / totalWeight) : null
-}
-
-function rankStats(
-  stats: readonly AccountStats[],
-  by: LeaderboardSort
-): AccountStats[] {
-  if (by === 'brier') {
-    return stats
-      .filter((s) => s.brierScore !== null && s.volume >= BRIER_MIN_VOLUME)
-      .sort((a, b) => (a.brierScore ?? 0) - (b.brierScore ?? 0))
-  }
-  if (by === 'volume') {
-    return [...stats].sort((a, b) => b.volume - a.volume)
-  }
-  return [...stats].sort((a, b) => b.realizedProfit - a.realizedProfit)
 }
 
 function clampLimit(limit: number): number {

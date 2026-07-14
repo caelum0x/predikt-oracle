@@ -352,13 +352,15 @@ export class OrderBook {
     // The reservation already left the balance at placement — no debit here.
     this.deps.credit(market.creator_id, fee)
     target.save(result.newPool, slice)
+    // Cost basis is pool-net (slice minus fee), mirroring MarketService.buy:
+    // a CANCEL refund of `invested` must not include fees already paid out.
     this.deps.adjustPosition(
       order.account_id,
       market.id,
       order.answer_id ?? '',
       order.side,
       result.shares,
-      slice
+      round6(slice - fee)
     )
     insertTrade(this.db, {
       marketId: market.id,

@@ -13,6 +13,10 @@ primary_region = "fra"
   DB_PATH = "/data/predikt-oracle.db"
   AI_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
   X402_NETWORK = "xlayer"
+  # Fly's edge proxy sets Fly-Client-IP and appends the verified peer to
+  # X-Forwarded-For, so forwarding headers are trustworthy here. Never set
+  # this on a deployment that accepts direct client connections.
+  TRUST_PROXY = "1"
 
 [[mounts]]
   source = "predikt_data"

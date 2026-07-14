@@ -1,7 +1,8 @@
 // Public web dashboard for Predikt Oracle. Serves the static single-page app
 // (index.html / app.css / app.js) from the project's /public directory.
-// Files are read lazily at request time and cached in-process after the
-// first read — no extra dependencies, no build step.
+// All three files are read eagerly when the routes are created (startup),
+// so the synchronous file I/O never runs inside a request handler where it
+// would block the event loop — no extra dependencies, no build step.
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -19,15 +20,15 @@ const STATIC_ENTRIES: Readonly<Record<string, StaticEntry>> = {
   },
 }
 
-// Module-level cache: file name -> file contents.
+// Module-level cache: absolute file path -> file contents.
 const fileCache = new Map<string, string>()
 
 function readPublicFile(fileName: string): string {
-  const cached = fileCache.get(fileName)
-  if (cached !== undefined) return cached
   const fullPath = join(process.cwd(), 'public', fileName)
+  const cached = fileCache.get(fullPath)
+  if (cached !== undefined) return cached
   const contents = readFileSync(fullPath, 'utf8')
-  fileCache.set(fileName, contents)
+  fileCache.set(fullPath, contents)
   return contents
 }
 
@@ -46,6 +47,17 @@ function serveEntry(c: Context, entry: StaticEntry): Response {
 
 export function createDashboardRoutes(): Hono {
   const app = new Hono()
+
+  // Warm the cache now (server startup) so the first request never pays for
+  // a blocking readFileSync. A missing file is reported per-request by
+  // serveEntry, so a broken deploy still gets a clean 500 instead of a crash.
+  for (const entry of Object.values(STATIC_ENTRIES)) {
+    try {
+      readPublicFile(entry.file)
+    } catch {
+      // Surfaced with full context by serveEntry when the path is requested.
+    }
+  }
 
   for (const [path, entry] of Object.entries(STATIC_ENTRIES)) {
     app.get(path, (c) => serveEntry(c, entry))

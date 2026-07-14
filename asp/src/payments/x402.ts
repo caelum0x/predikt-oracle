@@ -254,16 +254,11 @@ export async function verifyPayment(
     )
   }
 
-  // Burn the nonce. The PRIMARY KEY makes this race-safe: a concurrent
-  // duplicate insert fails and is reported as a replay.
-  try {
-    db.prepare(
-      'INSERT INTO x402_nonces (nonce, from_addr, used_at) VALUES (?, ?, ?)'
-    ).run(auth.nonce.toLowerCase(), auth.from.toLowerCase(), nowMs)
-  } catch {
-    throw new X402Error(402, 'Payment authorization nonce was already used.')
-  }
-
+  // The nonce is NOT burned here. Burning happens inside recordDeposit's
+  // transaction, atomically with the account credit — if settlement fails
+  // after verification (facilitator down, 5xx), the client's authorization
+  // stays reusable and a retry can still succeed. The check above is only a
+  // fast-fail; the PRIMARY KEY insert in recordDeposit is the race-safe gate.
   return { payer: auth.from, nonce: auth.nonce.toLowerCase(), value: auth.value }
 }
 
@@ -363,8 +358,10 @@ export type DepositRecord = {
 }
 
 /**
- * Credit a verified + settled deposit: bumps the account balance and records
- * the deposit row atomically.
+ * Credit a verified + settled deposit: burns the EIP-3009 nonce, bumps the
+ * account balance, and records the deposit row in one transaction. The nonce
+ * PRIMARY KEY makes the burn race-safe: a concurrent duplicate insert fails,
+ * rolls the whole transaction back (no credit), and reports a replay.
  */
 export function recordDeposit(
   db: Db,
@@ -372,12 +369,20 @@ export function recordDeposit(
     accountId: string
     amount: number
     txNonce: string
+    payer: string
     network: X402Network
   }
 ): DepositRecord {
   const run = db.transaction((): DepositRecord => {
     const id = newId('dep')
     const now = Date.now()
+    try {
+      db.prepare(
+        'INSERT INTO x402_nonces (nonce, from_addr, used_at) VALUES (?, ?, ?)'
+      ).run(input.txNonce.toLowerCase(), input.payer.toLowerCase(), now)
+    } catch {
+      throw new X402Error(402, 'Payment authorization nonce was already used.')
+    }
     const updated = db
       .prepare('UPDATE accounts SET balance = ROUND(balance + ?, 6) WHERE id = ?')
       .run(input.amount, input.accountId)

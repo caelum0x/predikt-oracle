@@ -54,13 +54,19 @@ function ok<T>(c: Context, data: T, status: 200 | 201 = 200) {
   return c.json({ success: true, data } satisfies ApiResponse<T>, status)
 }
 
-function fail(c: Context, status: 400 | 401 | 402 | 503, error: string) {
+// The full union of X402Error.status and ServiceError.status, so failFrom
+// needs no cast and new error statuses surface as compile errors here.
+function fail(
+  c: Context,
+  status: 400 | 401 | 402 | 403 | 404 | 409 | 503,
+  error: string
+) {
   return c.json({ success: false, error } satisfies ApiResponse<never>, status)
 }
 
 function failFrom(c: Context, err: unknown) {
   if (err instanceof X402Error || err instanceof ServiceError) {
-    return fail(c, err.status as 400 | 401 | 402 | 503, err.message)
+    return fail(c, err.status, err.message)
   }
   console.error(
     'deposit route unexpected error:',
@@ -150,6 +156,7 @@ export function createDepositRoutes(
         accountId: account.id,
         amount,
         txNonce: verified.nonce,
+        payer: verified.payer,
         network: payment.network,
       })
       c.header('X-PAYMENT-RESPONSE', buildPaymentResponseHeader(settlement))

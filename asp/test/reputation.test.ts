@@ -130,8 +130,9 @@ describe('accountStats', () => {
     expect(bobStats?.realizedProfit).toBeCloseTo(expectedBob, 4)
     expect(bobStats?.realizedProfit ?? 0).toBeGreaterThan(0)
 
-    // Carol held only NO shares in a YES market: total loss of her stake.
-    expect(accountStats(db, carol.id)?.realizedProfit).toBeCloseTo(-60, 4)
+    // Carol held only NO shares in a YES market: total loss of her pool-net
+    // stake (59.4 — the 1% fee is a separate transfer to the creator).
+    expect(accountStats(db, carol.id)?.realizedProfit).toBeCloseTo(-59.4, 4)
   })
 
   it('credits creators with fees and counts their markets', () => {
@@ -212,6 +213,80 @@ describe('leaderboard', () => {
       entries[1]!.brierScore!
     )
     expect(entries[0]!.accountId).toBe(bob.id) // right twice beats wrong once
+  })
+
+  it('SQL-side entries match accountStats field-for-field (incl. CANCEL and MULTI)', () => {
+    // The leaderboard is computed in a single SQL query; accountStats is the
+    // per-account reference implementation. They must agree exactly.
+    buildResolvedScenario()
+
+    // Add a cancelled market and a MULTI market so every profit/brier branch
+    // of the SQL is exercised.
+    const mCancel = makeMarket()
+    svc.buy(bob.id, mCancel.id, 'YES', 30)
+    svc.sell(
+      bob.id,
+      mCancel.id,
+      'YES',
+      svc.getPositions(bob.id).find((p) => p.marketId === mCancel.id)!
+        .yesShares / 2
+    )
+    svc.resolveMarket(creator.id, mCancel.id, 'CANCEL')
+
+    const multi = svc.createMarket(creator.id, {
+      question: 'Which team wins the reputation equivalence test?',
+      criteria: 'Resolves to the announced winner.',
+      closeTime: FUTURE(),
+      subsidy: 90,
+      outcomeType: 'MULTI',
+      answers: ['A', 'B', 'C'],
+    })
+    const [a1, a2] = multi.answers!
+    svc.buy(carol.id, multi.id, 'YES', 20, a1!.id)
+    svc.buy(bob.id, multi.id, 'NO', 15, a2!.id)
+    svc.resolveMarket(creator.id, multi.id, a2!.id)
+
+    for (const by of ['profit', 'volume', 'brier'] as const) {
+      const entries = leaderboard(db, { by, limit: 100 })
+      for (const entry of entries) {
+        const reference = accountStats(db, entry.accountId)!
+        const { rank: _rank, ...fields } = entry
+        expect(fields.volume).toBeCloseTo(reference.volume, 6)
+        expect(fields.realizedProfit).toBeCloseTo(reference.realizedProfit, 6)
+        expect(fields.feesEarned).toBeCloseTo(reference.feesEarned, 6)
+        if (reference.brierScore === null) {
+          expect(fields.brierScore).toBeNull()
+        } else {
+          expect(fields.brierScore).toBeCloseTo(reference.brierScore, 6)
+        }
+        expect(fields).toMatchObject({
+          accountId: reference.accountId,
+          name: reference.name,
+          marketsTraded: reference.marketsTraded,
+          marketsResolvedTraded: reference.marketsResolvedTraded,
+          marketsCreated: reference.marketsCreated,
+        })
+      }
+    }
+  })
+
+  it('applies the limit in SQL and issues a bounded number of queries', () => {
+    for (let i = 0; i < 25; i++) svc.createAccount(`crowd-agent-${i}`)
+
+    const prepared: string[] = []
+    const original = db.prepare.bind(db)
+    ;(db as { prepare: typeof db.prepare }).prepare = ((sql: string) => {
+      prepared.push(sql)
+      return original(sql)
+    }) as typeof db.prepare
+
+    const entries = leaderboard(db, { by: 'profit', limit: 5 })
+    expect(entries).toHaveLength(5)
+    expect(entries.map((e) => e.rank)).toEqual([1, 2, 3, 4, 5])
+    // One query total — never a per-account loop (the old implementation
+    // issued 1 + 7*N synchronous queries for N accounts).
+    expect(prepared).toHaveLength(1)
+    expect(prepared[0]).toContain('LIMIT')
   })
 })
 
