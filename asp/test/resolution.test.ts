@@ -176,6 +176,37 @@ describe('ResolutionSweeper.tick', () => {
     expect(afterCap.suggested).toBe(0)
   })
 
+  it('guards against overlapping ticks (no duplicate AI calls)', async () => {
+    const market = makeMarket()
+    overdue(market.id)
+
+    let calls = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    // A slow AI call: it blocks until we release the gate, letting a second
+    // tick start while the first is still in flight.
+    const complete: ChatCompletionFn = async () => {
+      calls += 1
+      await gate
+      return YES_HIGH
+    }
+
+    const s = sweeper(complete)
+    const first = s.tick() // begins, running = true, then awaits the AI call
+    const second = await s.tick() // must short-circuit on the running guard
+
+    expect(second).toEqual({ closed: 0, suggested: 0, failed: 0 })
+    expect(calls).toBe(1) // the overlapping tick did NOT issue a second AI call
+
+    release()
+    const firstResult = await first
+    expect(firstResult.suggested).toBe(1)
+    expect(calls).toBe(1)
+    expect(getSuggestion(db, market.id)!.verdict).toBe('YES')
+  })
+
   it('is idempotent: a second tick re-suggests nothing', async () => {
     const market = makeMarket()
     overdue(market.id)
@@ -270,6 +301,38 @@ describe('resolution routes', () => {
     })
     expect(forced.status).toBe(200)
     expect((await json(forced)).data.market.outcome).toBe('NO')
+  })
+
+  it('honors force even when the body is sent without a JSON content-type', async () => {
+    const market = makeMarket()
+    await sweepWith(responder(() => NO_LOW), market.id) // confidence 0.4, below gate
+
+    // A client sends { force: true } but omits Content-Type: application/json.
+    // The previous `c.req.json().catch(() => ({}))` swallowed this into {},
+    // silently ignoring force and returning 409. It must now be honored.
+    const res = await api.request(`/markets/${market.id}/resolve-suggested`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+        Authorization: `Bearer ${aliceKey}`,
+      },
+      body: JSON.stringify({ force: true }),
+    })
+    expect(res.status).toBe(200)
+    expect((await json(res)).data.market.outcome).toBe('NO')
+  })
+
+  it('rejects a genuinely malformed body with 400', async () => {
+    const market = makeMarket()
+    await sweepWith(responder(() => YES_HIGH), market.id)
+
+    const res = await api.request(`/markets/${market.id}/resolve-suggested`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${aliceKey}` },
+      body: '{ not json',
+    })
+    expect(res.status).toBe(400)
+    expect(svc.getMarket(market.id).status).toBe('CLOSED') // not resolved
   })
 
   it('never auto-applies an UNCLEAR suggestion, even forced', async () => {

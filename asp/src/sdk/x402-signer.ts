@@ -129,5 +129,7 @@ export async function buildPaymentHeader(
   if (typeof Buffer !== 'undefined') {
     return Buffer.from(json, 'utf8').toString('base64')
   }
-  return btoa(unescape(encodeURIComponent(json)))
+  // Standards-compliant browser/Workers path: encode UTF-8 bytes explicitly
+  // rather than relying on the deprecated `unescape` global.
+  return btoa(String.fromCharCode(...new TextEncoder().encode(json)))
 }

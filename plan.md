@@ -26,11 +26,23 @@
       submission assets (listing copy, 90s demo script, X post draft).
 
 ## Day 2 — Tue Jul 15  ⚠️ real deadline for listing
-- [ ] Build the real endpoint — free tier first, works end-to-end
-- [ ] Add x402 paid tier if time allows (strengthens Revenue Rocket / category
-      "performance"; free is still eligible)
-- [ ] **Submit the ASP listing by end of day** (starts the 24h review clock
-      with buffer for a rejection + resubmit)
+### Code progress log
+- [x] Workflow 3 (expansion): comments (w/ position disclosure), webhooks
+      (signed retried deliveries), search/categories/trending (FTS5 + LIKE),
+      AI auto-resolution (sweeper + confidence-gated apply), typed SDK + x402
+      signer. Salvaged from two model-limit interruptions; fixed a real
+      webhook dispatcher bug (stale failure_count). Integrated + background
+      workers wired into index.ts. 288 tests green, committed (ff743ad).
+- [~] Workflow 4 (running): adversarial review of the expansion modules
+      (correctness / security incl. webhook SSRF / typescript) → fix pass.
+
+### The build is submission-ready. Remaining items are USER actions:
+- [ ] Set up OKX Agentic Wallet
+- [ ] Deploy to a public URL: `cd asp && fly launch` (see fly.toml comments),
+      set OPENROUTER_API_KEY (+ X402_PAY_TO for deposits), then
+      `DB_PATH=... npx tsx scripts/seed.ts`; put the URL in submission/*.md
+- [ ] Register the ASP via the OKX.AI agent flow using submission/listing.md
+- [ ] **Submit the ASP listing by end of day** (24h review clock + resubmit buffer)
 
 ## Day 3 — Wed Jul 16 (while review runs)
 - [ ] Record ≤90s demo: agent calls ASP end-to-end, incl. payment if paid

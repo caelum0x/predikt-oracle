@@ -314,6 +314,37 @@ describe('dispatcher tick delivery', () => {
     expect(recorder.calls).toHaveLength(2)
   })
 
+  it('never delivers events that predate the subscription', async () => {
+    // Events 1 and 2 exist BEFORE the webhook subscribes.
+    const market = makeMarket()
+    svc.buy(bob.id, market.id, 'YES', 20)
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n
+    ).toBe(2)
+
+    const { webhook } = createWebhook(db, bob.id, {
+      url: 'https://late.example/hook',
+      events: [...EVENT_TYPES],
+    })
+    // The subscription pinned its start cursor to the current end of the log.
+    expect(webhookRow(webhook.id).start_event_id).toBe(2)
+
+    const recorder = makeRecorder()
+    const dispatcher = new WebhookDispatcher({ db, fetchFn: recorder.fetchFn })
+
+    // First tick: the two historical events are NOT delivered to the new hook.
+    const first = await dispatcher.tick()
+    expect(first.enqueued).toBe(0)
+    expect(recorder.calls).toHaveLength(0)
+
+    // A fresh event AFTER subscription is delivered.
+    svc.buy(bob.id, market.id, 'NO', 15)
+    const second = await dispatcher.tick()
+    expect(second.enqueued).toBe(1)
+    expect(recorder.calls).toHaveLength(1)
+    expect(recorder.calls[0]!.headers['X-Predikt-Event']).toBe('trade.executed')
+  })
+
   it('auto-deactivates a webhook after 20 consecutive failures', async () => {
     const { webhook } = createWebhook(db, bob.id, {
       url: 'https://dead.example/hook',
@@ -418,6 +449,62 @@ describe('webhook routes', () => {
       expect(res.status).toBe(400)
       expect((await json(res)).success).toBe(false)
     }
+  })
+
+  it('rejects webhook URLs targeting private, loopback, or metadata hosts (SSRF)', async () => {
+    const blocked = [
+      'http://169.254.169.254/latest/meta-data/',
+      'http://localhost:8080/hook',
+      'http://127.0.0.1/hook',
+      'https://10.0.0.5/hook',
+      'https://192.168.1.10/hook',
+      'https://172.16.0.9/hook',
+      'https://172.31.255.1/hook',
+      'http://[::1]/hook',
+      'http://metadata.google.internal/computeMetadata/v1/',
+    ]
+    for (const url of blocked) {
+      const res = await req('/webhooks', {
+        key: bobKey,
+        body: { url, events: ['market.created'] },
+      })
+      expect(res.status, `expected ${url} to be rejected`).toBe(400)
+      expect((await json(res)).success).toBe(false)
+      // Nothing was persisted for a blocked target.
+      const list = await json(await req('/webhooks', { key: bobKey }))
+      expect(list.data.webhooks).toHaveLength(0)
+    }
+
+    // A public host in a non-blocked range is still accepted.
+    const okRes = await req('/webhooks', {
+      key: bobKey,
+      body: { url: 'https://172.32.0.1/hook', events: ['market.created'] },
+    })
+    expect(okRes.status).toBe(201)
+  })
+
+  it('rate limits rapid webhook creation per account', async () => {
+    // The per-account create limit is 10/hour; the 11th create in a burst is
+    // throttled with 429 even though active webhooks are deleted in between.
+    let throttled = 0
+    for (let i = 0; i < 12; i += 1) {
+      const res = await req('/webhooks', {
+        key: bobKey,
+        body: { url: `https://agent.example/hook/${i}`, events: ['trade.executed'] },
+      })
+      if (res.status === 429) {
+        throttled += 1
+        expect(res.headers.get('Retry-After')).toBeTruthy()
+      } else {
+        // Keep active count low so the 5-active cap never trips first.
+        const created = await json(res)
+        await req(`/webhooks/${created.data.webhook.id}`, {
+          method: 'DELETE',
+          key: bobKey,
+        })
+      }
+    }
+    expect(throttled).toBeGreaterThan(0)
   })
 
   it('lists only the caller’s webhooks', async () => {

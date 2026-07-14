@@ -11,6 +11,7 @@ import type { Context, MiddlewareHandler } from 'hono'
 import { z } from 'zod'
 import { MarketService, ServiceError, type Account } from '../engine/service'
 import type { Db } from '../engine/store'
+import { consumeToken, type RateLimitConfig } from '../ai/rate-limit'
 import {
   createWebhook,
   deleteWebhook,
@@ -22,6 +23,7 @@ import {
   type Webhook,
   type WebhookRow,
 } from '../webhooks/events'
+import { webhookUrlError } from '../webhooks/ssrf'
 
 type ApiResponse<T> = { success: boolean; data?: T; error?: string }
 
@@ -29,16 +31,26 @@ type Env = { Variables: { account: Account } }
 
 type WebhookView = Omit<Webhook, 'accountId'> & { secret: string }
 
+// 10 webhook registrations per account per hour. This is a separate guard from
+// the 5-active-webhook cap: it throttles rapid create/delete cycling that would
+// otherwise let a caller sweep internal addresses one batch at a time.
+const WEBHOOK_CREATE_LIMIT: RateLimitConfig = {
+  capacity: 10,
+  refillWindowMs: 3_600_000,
+}
+
 const createWebhookSchema = z.object({
   url: z
     .string()
     .trim()
     .url('url must be a valid http(s) URL.')
     .max(500)
-    .refine(
-      (u) => u.startsWith('http://') || u.startsWith('https://'),
-      'url must use http or https.'
-    ),
+    // Reject non-http(s) schemes AND destinations that resolve (by literal
+    // host) to private/loopback/link-local/metadata addresses. See
+    // ../webhooks/ssrf.ts for the exact rules and residual DNS-rebinding risk.
+    .refine((u) => webhookUrlError(u) === null, (u) => ({
+      message: webhookUrlError(u) ?? 'url is not an allowed webhook target.',
+    })),
   events: z
     .array(z.enum(EVENT_TYPES))
     .min(1, 'events must contain at least one event type.')
@@ -114,10 +126,22 @@ export function createWebhookRoutes(deps: {
 
   // Subscribe to market events. The secret in the response is shown ONCE.
   app.post('/webhooks', auth, async (c) => {
+    const account = c.get('account')
+    const limit = consumeToken(`webhook-create:${account.id}`, WEBHOOK_CREATE_LIMIT)
+    if (!limit.allowed) {
+      c.header('Retry-After', String(limit.retryAfterSeconds))
+      return c.json(
+        {
+          success: false,
+          error: 'Too many webhook registrations. Please wait and try again.',
+        } satisfies ApiResponse<never>,
+        429
+      )
+    }
     const parsed = await parseBody(c, createWebhookSchema)
     if ('error' in parsed) return failFrom(c, new ServiceError(400, parsed.error))
     try {
-      const { webhook, secret } = createWebhook(db, c.get('account').id, parsed.data)
+      const { webhook, secret } = createWebhook(db, account.id, parsed.data)
       const { accountId: _accountId, ...view } = webhook
       return ok(
         c,

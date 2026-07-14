@@ -150,6 +150,7 @@ export class WebhookDispatcher {
       const matching = this.db.prepare(
         `SELECT id FROM webhooks
           WHERE is_active = 1
+            AND start_event_id < ?
             AND EXISTS (SELECT 1 FROM json_each(webhooks.events) WHERE value = ?)`
       )
       const insert = this.db.prepare(
@@ -158,7 +159,9 @@ export class WebhookDispatcher {
       )
       let enqueued = 0
       for (const event of events) {
-        const hooks = matching.all(event.type) as { id: string }[]
+        // A webhook only matches events emitted after it subscribed
+        // (start_event_id < event.id), never historical ones.
+        const hooks = matching.all(event.id, event.type) as { id: string }[]
         for (const hook of hooks) {
           insert.run(newId('dlv'), hook.id, event.id, now)
           enqueued += 1
@@ -251,16 +254,20 @@ export class WebhookDispatcher {
     }
 
     if (error === null) {
-      this.db
-        .prepare(
-          `UPDATE deliveries
-              SET status = 'ok', attempts = ?, last_error = NULL, delivered_at = ?
-            WHERE id = ?`
-        )
-        .run(row.attempts + 1, now, row.id)
-      this.db
-        .prepare('UPDATE webhooks SET failure_count = 0 WHERE id = ?')
-        .run(row.webhook_id)
+      // Both writes commit together: a crash between them must not leave a
+      // delivery marked ok while the webhook keeps a stale failure_count.
+      this.db.transaction(() => {
+        this.db
+          .prepare(
+            `UPDATE deliveries
+                SET status = 'ok', attempts = ?, last_error = NULL, delivered_at = ?
+              WHERE id = ?`
+          )
+          .run(row.attempts + 1, now, row.id)
+        this.db
+          .prepare('UPDATE webhooks SET failure_count = 0 WHERE id = ?')
+          .run(row.webhook_id)
+      })()
       return 'ok'
     }
 
@@ -303,27 +310,33 @@ export class WebhookDispatcher {
   // increment is atomic in SQL (not derived from a value read earlier in the
   // tick), so many failures in one pass accumulate correctly.
   private recordWebhookFailure(webhookId: string, now: number): void {
-    this.db
-      .prepare(
-        'UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = ?'
-      )
-      .run(webhookId)
-    const row = this.db
-      .prepare('SELECT failure_count FROM webhooks WHERE id = ?')
-      .get(webhookId) as { failure_count: number } | undefined
-    if (row && row.failure_count >= DEACTIVATE_AFTER_CONSECUTIVE_FAILURES) {
-      this.db
-        .prepare('UPDATE webhooks SET is_active = 0 WHERE id = ?')
-        .run(webhookId)
+    // The increment, the deactivation check, and the pending-delivery sweep
+    // commit as one unit so a crash can't leave is_active = 0 with deliveries
+    // still marked pending (which would later overwrite the deactivation
+    // reason with a generic error).
+    this.db.transaction(() => {
       this.db
         .prepare(
-          `UPDATE deliveries
-              SET status = 'failed', last_error = 'Webhook was deactivated after repeated failures.',
-                  next_attempt_at = ?
-            WHERE webhook_id = ? AND status = 'pending'`
+          'UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = ?'
         )
-        .run(now, webhookId)
-    }
+        .run(webhookId)
+      const row = this.db
+        .prepare('SELECT failure_count FROM webhooks WHERE id = ?')
+        .get(webhookId) as { failure_count: number } | undefined
+      if (row && row.failure_count >= DEACTIVATE_AFTER_CONSECUTIVE_FAILURES) {
+        this.db
+          .prepare('UPDATE webhooks SET is_active = 0 WHERE id = ?')
+          .run(webhookId)
+        this.db
+          .prepare(
+            `UPDATE deliveries
+                SET status = 'failed', last_error = 'Webhook was deactivated after repeated failures.',
+                    next_attempt_at = ?
+              WHERE webhook_id = ? AND status = 'pending'`
+          )
+          .run(now, webhookId)
+      }
+    })()
   }
 
   private isDeactivated(webhookId: string): boolean {

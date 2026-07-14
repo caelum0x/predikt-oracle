@@ -216,6 +216,7 @@ export class ResolutionSweeper {
   private readonly complete: ChatCompletionFn
   private readonly intervalMs: number
   private timer: NodeJS.Timeout | null = null
+  private running = false
 
   constructor(options: ResolutionSweeperOptions) {
     this.db = options.db
@@ -248,41 +249,51 @@ export class ResolutionSweeper {
 
   /** One sweep pass. Exposed for tests and manual triggering. */
   async tick(): Promise<TickResult> {
-    const now = Date.now()
+    // Guard against overlapping passes: with a slow AI provider a tick can
+    // outlive the polling interval, and a second concurrent tick would read the
+    // same candidates (their suggestions are not yet committed), duplicate AI
+    // calls, and double-increment the per-market failure counter.
+    if (this.running) return { closed: 0, suggested: 0, failed: 0 }
+    this.running = true
+    try {
+      const now = Date.now()
 
-    // Lifecycle: a market past close_time may no longer be OPEN, whether or
-    // not the AI produces anything for it.
-    const closed = this.db
-      .prepare(
-        "UPDATE markets SET status = 'CLOSED' WHERE status = 'OPEN' AND close_time <= ?"
-      )
-      .run(now).changes
+      // Lifecycle: a market past close_time may no longer be OPEN, whether or
+      // not the AI produces anything for it.
+      const closed = this.db
+        .prepare(
+          "UPDATE markets SET status = 'CLOSED' WHERE status = 'OPEN' AND close_time <= ?"
+        )
+        .run(now).changes
 
-    const candidates = this.db
-      .prepare(
-        `SELECT m.id FROM markets m
-          WHERE m.status = 'CLOSED'
-            AND m.close_time <= ?
-            AND NOT EXISTS (
-              SELECT 1 FROM resolution_suggestions s WHERE s.market_id = m.id
-            )
-            AND COALESCE(
-              (SELECT a.attempts FROM resolution_attempts a WHERE a.market_id = m.id),
-              0
-            ) < ?
-          ORDER BY m.close_time ASC
-          LIMIT ?`
-      )
-      .all(now, MAX_ATTEMPTS, MARKETS_PER_TICK) as { id: string }[]
+      const candidates = this.db
+        .prepare(
+          `SELECT m.id FROM markets m
+            WHERE m.status = 'CLOSED'
+              AND m.close_time <= ?
+              AND NOT EXISTS (
+                SELECT 1 FROM resolution_suggestions s WHERE s.market_id = m.id
+              )
+              AND COALESCE(
+                (SELECT a.attempts FROM resolution_attempts a WHERE a.market_id = m.id),
+                0
+              ) < ?
+            ORDER BY m.close_time ASC
+            LIMIT ?`
+        )
+        .all(now, MAX_ATTEMPTS, MARKETS_PER_TICK) as { id: string }[]
 
-    let suggested = 0
-    let failed = 0
-    for (const candidate of candidates) {
-      const stored = await this.suggestFor(candidate.id)
-      if (stored) suggested += 1
-      else failed += 1
+      let suggested = 0
+      let failed = 0
+      for (const candidate of candidates) {
+        const stored = await this.suggestFor(candidate.id)
+        if (stored) suggested += 1
+        else failed += 1
+      }
+      return { closed, suggested, failed }
+    } finally {
+      this.running = false
     }
-    return { closed, suggested, failed }
   }
 
   // Generates, validates, maps, and stores one market's suggestion. Any

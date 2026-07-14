@@ -132,12 +132,29 @@ export function createResolutionRoutes(deps: {
       )
     }
 
+    // Parse the body from raw text so a missing Content-Type does not silently
+    // drop a { "force": true } the caller actually sent. An absent/empty body
+    // is treated as {}; a present-but-malformed body is a 400 rather than being
+    // swallowed into an empty object.
     let body: { force?: boolean }
-    try {
-      const raw = await c.req.json().catch(() => ({}))
-      body = applyBodySchema.parse(raw)
-    } catch {
-      return failFrom(c, new ServiceError(400, 'Invalid request body.'))
+    const rawText = await c.req.text()
+    if (rawText.trim() === '') {
+      body = {}
+    } else {
+      let raw: unknown
+      try {
+        raw = JSON.parse(rawText)
+      } catch {
+        return failFrom(c, new ServiceError(400, 'Request body must be JSON.'))
+      }
+      const result = applyBodySchema.safeParse(raw)
+      if (!result.success) {
+        return failFrom(
+          c,
+          new ServiceError(400, result.error.issues[0]?.message ?? 'Invalid request body.')
+        )
+      }
+      body = result.data
     }
     const force = body.force ?? false
 

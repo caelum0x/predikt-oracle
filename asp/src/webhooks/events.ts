@@ -44,7 +44,11 @@ CREATE TABLE IF NOT EXISTS webhooks (
   secret         TEXT NOT NULL,           -- plaintext: needed to sign deliveries
   is_active      INTEGER NOT NULL DEFAULT 1,
   created_at     INTEGER NOT NULL,
-  failure_count  INTEGER NOT NULL DEFAULT 0
+  failure_count  INTEGER NOT NULL DEFAULT 0,
+  -- The highest events.id that existed when this subscription was created.
+  -- The dispatcher only delivers events with a STRICTLY GREATER id, so a new
+  -- webhook never receives events that predated it (see enqueueNewEvents).
+  start_event_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -121,9 +125,22 @@ BEGIN
 END;
 `
 
+function hasColumn(db: Db, table: string, column: string): boolean {
+  const cols = db.pragma(`table_info(${table})`) as { name: string }[]
+  return cols.some((col) => col.name === column)
+}
+
 /** Idempotently creates the event/webhook tables, triggers, and indexes. */
 export function initEventsSchema(db: Db): void {
   db.exec(EVENTS_SCHEMA)
+  // Upgrade databases created before per-subscription start cursors existed.
+  // Pre-existing webhooks default to 0 (they keep their historical behavior of
+  // matching from the beginning of the event log).
+  if (!hasColumn(db, 'webhooks', 'start_event_id')) {
+    db.exec(
+      'ALTER TABLE webhooks ADD COLUMN start_event_id INTEGER NOT NULL DEFAULT 0'
+    )
+  }
   db.prepare(
     'INSERT OR IGNORE INTO dispatcher_state (id, last_event_id) VALUES (1, 0)'
   ).run()
@@ -148,6 +165,7 @@ export type WebhookRow = {
   is_active: number
   created_at: number
   failure_count: number
+  start_event_id: number
 }
 
 export type Webhook = {
@@ -200,11 +218,19 @@ export function createWebhook(
     const id = newId('wh')
     const secret = `whsec_${randomBytes(24).toString('hex')}`
     const now = Date.now()
+    // Snapshot the current end of the event log. The dispatcher delivers only
+    // events with a strictly greater id, so this subscription never receives
+    // events that were emitted before it was created.
+    const startEventId = (
+      db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM events').get() as {
+        m: number
+      }
+    ).m
     db.prepare(
       `INSERT INTO webhooks
-         (id, account_id, url, events, secret, is_active, created_at, failure_count)
-       VALUES (?, ?, ?, ?, ?, 1, ?, 0)`
-    ).run(id, accountId, input.url, JSON.stringify(events), secret, now)
+         (id, account_id, url, events, secret, is_active, created_at, failure_count, start_event_id)
+       VALUES (?, ?, ?, ?, ?, 1, ?, 0, ?)`
+    ).run(id, accountId, input.url, JSON.stringify(events), secret, now, startEventId)
     return {
       webhook: {
         id,
