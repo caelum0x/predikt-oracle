@@ -5,12 +5,24 @@ generator boots the actual server, runs the genuine API flow (signup → create 
 quote → buy → resolve → payout → leaderboard) capturing live responses, and screenshots
 the live dashboard at `/app` with headless Chrome. All are under the hackathon's 90-second limit.
 
+### Demo cut (the ≤90s submission video)
 | File | Length | What it is |
 |---|---|---|
-| **`predikt-oracle-voiced.mp4`** | ~76s | 🎙️ **Voiced + subtitled** — narrated walkthrough (TTS), slide timing driven by the narration. Ships with `predikt-oracle-voiced.srt`. **Use this for the submission.** |
+| **`predikt-oracle-voiced.mp4`** | ~76s | 🎙️ **Voiced + subtitled** — narrated walkthrough (TTS), slide timing driven by the narration. Ships with `predikt-oracle-voiced.srt`. **Use this as the submission demo.** |
 | `predikt-oracle-demo.mp4` | ~57s | Captioned slide reel (no audio) — the same story, silent. |
 | `predikt-oracle-terminal.mp4` | ~23s | Asciinema-style live terminal recording with a typing effect. |
 | `predikt-oracle-terminal.cast` | — | Native asciinema v2 cast (`asciinema play …` or upload to asciinema.org). |
+
+### Launch pack (viral, text-first, silent — built for the X post)
+X autoplays muted, so these are big-type, fast-cut, silent — post them as the hook, then link the
+full voiced demo.
+| File | Length | What it is |
+|---|---|---|
+| `predikt-launch-hype.mp4` | ~22s | The "we shipped it" launch cut — hook, capability flashes, CTA. |
+| `predikt-use-case.mp4` | ~21s | A concrete two-agent scenario: disagree → price it → the calibrated one profits. |
+| `predikt-build-story.mp4` | ~23s | The build process — agent-native rebuild, 2 adversarial reviews, 294 tests. |
+
+Generate the launch pack with `node submission/make-launch-videos.mjs`.
 
 ## Storyboard (voiced & silent reels)
 
