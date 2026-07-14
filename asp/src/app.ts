@@ -31,6 +31,10 @@ import { SERVICE_MANIFEST } from './manifest'
 import { MarketService } from './engine/service'
 import { openDb, type Db } from './engine/store'
 import { createMarketRoutes } from './routes/markets'
+import { createDepositRoutes } from './routes/deposits'
+import { createStatsRoutes } from './routes/stats'
+import { createActivityRoutes } from './routes/activity'
+import { createDashboardRoutes } from './routes/dashboard'
 
 // Consistent envelope for every response.
 type ApiResponse<T> = {
@@ -105,6 +109,15 @@ export function createApp(options: AppOptions = {}): Hono {
 
   // Accounts + market lifecycle + trading.
   app.route('/', createMarketRoutes(service))
+  // USDT deposits via the x402 payment protocol (verify-only until a
+  // facilitator is configured).
+  app.route('/', createDepositRoutes(service, db))
+  // Public reputation, leaderboard, and platform analytics.
+  app.route('/', createStatsRoutes(db))
+  // Trade history, portfolios, and the global activity feed.
+  app.route('/', createActivityRoutes(service, db))
+  // Human-facing dashboard at /app.
+  app.route('/', createDashboardRoutes())
 
   // POST /tools/draft-market — topic/news/url → validated market drafts.
   app.post('/tools/draft-market', async (c) => {

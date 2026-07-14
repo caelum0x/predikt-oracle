@@ -2,7 +2,7 @@
   "name": "predikt-oracle-asp",
   "version": "0.1.0",
   "private": true,
-  "description": "Predikt Oracle — prediction-market toolkit for AI agents (OKX.AI A2MCP service): draft markets, estimate odds, suggest resolutions.",
+  "description": "Predikt Oracle \u2014 prediction-market toolkit for AI agents (OKX.AI A2MCP service): draft markets, estimate odds, suggest resolutions.",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -11,12 +11,17 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "mcp": "tsx src/mcp/index.ts",
+    "bot": "tsx src/bots/run.ts",
+    "bot:once": "BOT_ONCE=1 tsx src/bots/run.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.11.1",
     "hono": "^4.6.14",
+    "viem": "^2.55.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {
