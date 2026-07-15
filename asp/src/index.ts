@@ -11,10 +11,13 @@ import { WebhookDispatcher } from './webhooks/dispatcher'
 import { ResolutionSweeper } from './resolution/sweeper'
 
 if (!process.env.OPENROUTER_API_KEY?.trim()) {
+  // Non-fatal: the market, trading, x402, and MCP layers work without it —
+  // only the /tools/* AI endpoints need it, and they report the missing key
+  // per-request. Keeping the server up matters for a listed ASP endpoint.
   console.error(
-    'OPENROUTER_API_KEY is not set. Copy .env.example to .env and fill it in.'
+    'WARNING: OPENROUTER_API_KEY is not set — the AI tool endpoints (/tools/*) ' +
+      'will return an error until it is configured; everything else works.'
   )
-  process.exit(1)
 }
 
 const port = Number(process.env.PORT) || 8787

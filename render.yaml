@@ -1,0 +1,35 @@
+# Render Blueprint — deploys the Predikt Oracle ASP as a Docker web service.
+#
+# One-click: Render Dashboard → New → Blueprint → connect the
+# github.com/caelum0x/predikt-oracle repo → Apply. Then set OPENROUTER_API_KEY
+# (and optionally X402_PAY_TO) in the service's Environment tab.
+#
+# Free tier caveats: the service sleeps after ~15 min idle (cold start on the
+# next request) and has no persistent disk, so the SQLite data resets on
+# restart. Upgrade to a paid instance + a disk mounted at /data for durability.
+services:
+  - type: web
+    name: predikt-oracle
+    runtime: docker
+    repo: https://github.com/caelum0x/predikt-oracle
+    branch: master
+    dockerfilePath: ./asp/Dockerfile
+    dockerContext: ./asp
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Render injects PORT automatically; the app reads process.env.PORT.
+      - key: AI_MODEL
+        value: meta-llama/llama-3.1-8b-instruct:free
+      - key: X402_NETWORK
+        value: xlayer
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DB_PATH
+        value: /data/predikt-oracle.db
+      # Set these in the Render dashboard (Environment tab), not in git:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: X402_PAY_TO
+        sync: false
