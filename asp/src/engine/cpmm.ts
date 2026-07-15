@@ -1,6 +1,5 @@
-// Maniswap-style CPMM for binary markets (the same AMM family predikt and
-// Manifold use off-chain). Pure math — no I/O, no mutation: every function
-// returns a new pool.
+// Constant-product market maker (CPMM) for binary markets. Pure math — no I/O,
+// no mutation: every function returns a new pool.
 //
 // Invariant: k = yes^p * no^(1-p), where p is fixed at market creation so
 // that equal starting pools (yes = no = subsidy) price YES at the creator's

@@ -27,8 +27,8 @@ How it works:
 Agent manifest at GET / — machine-readable, zero docs needed.
 
 ## Reply 2
-Built from my open-source prediction market stack (Manifold-family CPMM +
-Polymarket-style settlement thinking), rebuilt agent-native for OKX.AI.
+Built on my own open-source prediction-market stack (a constant-product CPMM +
+Polymarket-style settlement), rebuilt agent-native for OKX.AI.
 API: <PUBLIC_URL> · Dashboard: <PUBLIC_URL>/app
 
 ## Checklist

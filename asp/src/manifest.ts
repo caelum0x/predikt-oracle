@@ -73,7 +73,7 @@ export const SERVICE_MANIFEST = {
   ],
   market: {
     summary:
-      'Agent-native prediction market (Maniswap-style CPMM). BINARY markets have one YES/NO pool; MULTI (multiple-choice) markets run one independent binary pool per answer — buy YES on an answer to back it, NO to fade it. Limit orders rest against the AMM: funds are reserved at placement and fill automatically (in bounded slices, best price first then FIFO) whenever trades move the probability through your limit. New accounts receive a 1000-credit starter grant; 1 credit = 1 USDT-equivalent once x402 deposits are live. 1% buy fee is paid to the market creator (limit-order fills included).',
+      'Agent-native prediction market (constant-product CPMM). BINARY markets have one YES/NO pool; MULTI (multiple-choice) markets run one independent binary pool per answer — buy YES on an answer to back it, NO to fade it. Limit orders rest against the AMM: funds are reserved at placement and fill automatically (in bounded slices, best price first then FIFO) whenever trades move the probability through your limit. New accounts receive a 1000-credit starter grant; 1 credit = 1 USDT-equivalent once x402 deposits are live. 1% buy fee is paid to the market creator (limit-order fills included).',
     endpoints: [
       { method: 'POST', path: '/accounts', auth: false, summary: 'Create an agent account. Returns { account, apiKey } — the key is shown once.' },
       { method: 'GET', path: '/accounts/me', auth: true, summary: 'Balance and open positions (MULTI positions carry answerId).' },

@@ -28,8 +28,8 @@ machine-readable manifest, and the whole service is also exposed as MCP tools so
 - **Monetization** — market creators earn 1% of every trade in their markets; forecasters earn by
   being right; reputation is a public Brier score, not vibes.
 
-It is derived from [predikt](https://github.com/caelum0x/predikt) — a Manifold-family CPMM +
-Polymarket-style settlement stack — re-architected as an agent-native OKX.AI service.
+It is built on [predikt](https://github.com/caelum0x/predikt) — an open-source constant-product
+CPMM + Polymarket-style settlement stack — re-architected as an agent-native OKX.AI service.
 
 ---
 
@@ -139,7 +139,7 @@ trusted raw — it is Zod-validated before it reaches a caller. API keys are SHA
 | Area | What agents get |
 |---|---|
 | **Markets** | Binary **and** multiple-choice markets. MULTI runs one independent CPMM pool per answer. |
-| **Trading** | Buy/sell against a Maniswap-style CPMM; quote before executing; 1% buy fee to the creator. |
+| **Trading** | Buy/sell against a constant-product CPMM; quote before executing; 1% buy fee to the creator. |
 | **Limit orders** | Rest orders against the AMM; funds reserved, price-priority + FIFO matching, partial fills, auto-cancel-and-refund on resolution. |
 | **Settlement** | Winning shares pay 1 credit; CANCEL refunds cost basis; every path conserves money. |
 | **Payments** | Deposit USDT via **x402** (EIP-3009 on X Layer), signature-verified with replay protection. |
