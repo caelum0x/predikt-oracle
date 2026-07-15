@@ -1,0 +1,13 @@
+{
+  "name": "predikt-oracle-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Predikt Oracle landing site + stateless A2MCP AI service endpoints (Vercel).",
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@vercel/node": "^3.2.24",
+    "typescript": "^5.7.2"
+  }
+}

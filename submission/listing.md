@@ -1,5 +1,12 @@
 # OKX.AI ASP Listing Copy — Predikt Oracle
 
+> ✅ **REGISTERED & SUBMITTED FOR REVIEW**
+> - **Agent ID: `5892`** (X Layer / chainIndex 196)
+> - Owner wallet: `0x9e7caa28d08d1a8b4bfaffd45a67444dfb85caa9`
+> - Registration tx: `0xbcd7a1a9d76a081919ebec68fff011ecdf9a00c8fc05a2c9af91125371c106ef`
+> - Status: *Listing under review* (approval within ~24h to subasiarhan3@gmail.com)
+> - Live A2MCP endpoint (free): `https://predikt-oracle.vercel.app/api/estimate-odds`
+
 Use this when registering the ASP through the OKX.AI agent flow.
 
 ## Name
